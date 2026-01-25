@@ -1,0 +1,10 @@
+[package]
+name = "lpinfo-rs"
+version = "0.1.0"
+edition = "2024"
+description = "An experimental Rust implementation of lpinfo command to list available printers and print drivers using CUPS."
+readme = "README.md"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+cups_rs = "0.3.0"
