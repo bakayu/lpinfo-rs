@@ -1,10 +1,11 @@
 use clap::Parser;
 use cups_rs::bindings::{
     cupsDoRequest, cupsLastErrorString, ipp_op_e_IPP_OP_CUPS_GET_DEVICES,
-    ipp_op_e_IPP_OP_CUPS_GET_PPDS, ipp_tag_e_IPP_TAG_INTEGER, ipp_tag_e_IPP_TAG_KEYWORD,
-    ipp_tag_e_IPP_TAG_NAME, ipp_tag_e_IPP_TAG_OPERATION, ipp_tag_e_IPP_TAG_TEXT, ippAddInteger,
-    ippAddString, ippDelete, ippFirstAttribute, ippGetName, ippGetString, ippNewRequest,
-    ippNextAttribute,
+    ipp_op_e_IPP_OP_CUPS_GET_PPDS, ipp_status_e_IPP_STATUS_OK,
+    ipp_status_e_IPP_STATUS_OK_CONFLICTING, ipp_status_e_IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED,
+    ipp_tag_e_IPP_TAG_INTEGER, ipp_tag_e_IPP_TAG_KEYWORD, ipp_tag_e_IPP_TAG_NAME,
+    ipp_tag_e_IPP_TAG_OPERATION, ipp_tag_e_IPP_TAG_TEXT, ippAddInteger, ippAddString, ippDelete,
+    ippFirstAttribute, ippGetName, ippGetStatusCode, ippGetString, ippNewRequest, ippNextAttribute,
 };
 use cups_rs::config::{EncryptionMode, set_encryption, set_server};
 use cups_rs::{ConnectionFlags, get_all_destinations, get_default_destination};
@@ -166,8 +167,13 @@ fn show_devices(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let response = unsafe { cupsDoRequest(connection.as_ptr(), request, resource.as_ptr()) };
 
     if response.is_null() {
-        let error = unsafe { std::ffi::CStr::from_ptr(cupsLastErrorString()).to_string_lossy() };
-        return Err(format!("lpinfo: {}", error).into());
+        return Err(format!("lpinfo: {}", cups_last_error()).into());
+    }
+
+    let status = unsafe { ippGetStatusCode(response) };
+    if !ipp_is_success(status) {
+        unsafe { cups_rs::bindings::ippDelete(response) };
+        return Err(format!("lpinfo: CUPS-GET-DEVICES failed: {}", cups_last_error()).into());
     }
 
     // Parse the result
@@ -346,8 +352,13 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let response = unsafe { cupsDoRequest(connection.as_ptr(), request, resource.as_ptr()) };
 
     if response.is_null() {
-        let error = unsafe { std::ffi::CStr::from_ptr(cupsLastErrorString()).to_string_lossy() };
-        return Err(format!("lpinfo: {}", error).into());
+        return Err(format!("lpinfo: {}", cups_last_error()).into());
+    }
+
+    let status = unsafe { ippGetStatusCode(response) };
+    if !ipp_is_success(status) {
+        unsafe { cups_rs::bindings::ippDelete(response) };
+        return Err(format!("lpinfo: CUPS-GET-PPDS failed: {}", cups_last_error()).into());
     }
 
     let mut ppd_name = String::new();
@@ -438,4 +449,20 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Returns last cups error string
+fn cups_last_error() -> String {
+    unsafe {
+        std::ffi::CStr::from_ptr(cupsLastErrorString())
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Check if response to the ipp request was a success
+fn ipp_is_success(status: i32) -> bool {
+    status == ipp_status_e_IPP_STATUS_OK
+        || status == ipp_status_e_IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED
+        || status == ipp_status_e_IPP_STATUS_OK_CONFLICTING
 }
