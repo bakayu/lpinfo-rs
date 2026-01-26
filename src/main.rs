@@ -3,11 +3,13 @@ use cups_rs::bindings::{
     cupsDoRequest, cupsLastErrorString, ipp_op_e_IPP_OP_CUPS_GET_DEVICES,
     ipp_op_e_IPP_OP_CUPS_GET_PPDS, ipp_status_e_IPP_STATUS_OK,
     ipp_status_e_IPP_STATUS_OK_CONFLICTING, ipp_status_e_IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED,
-    ipp_tag_e_IPP_TAG_INTEGER, ipp_tag_e_IPP_TAG_KEYWORD, ipp_tag_e_IPP_TAG_NAME,
-    ipp_tag_e_IPP_TAG_OPERATION, ipp_tag_e_IPP_TAG_TEXT, ippAddInteger, ippAddString, ippDelete,
-    ippFirstAttribute, ippGetName, ippGetStatusCode, ippGetString, ippNewRequest, ippNextAttribute,
+    ipp_tag_e_IPP_TAG_CHARSET, ipp_tag_e_IPP_TAG_INTEGER, ipp_tag_e_IPP_TAG_KEYWORD,
+    ipp_tag_e_IPP_TAG_LANGUAGE, ipp_tag_e_IPP_TAG_NAME, ipp_tag_e_IPP_TAG_OPERATION,
+    ipp_tag_e_IPP_TAG_TEXT, ippAddInteger, ippAddString, ippDelete, ippFirstAttribute, ippGetName,
+    ippGetStatusCode, ippGetString, ippNewRequest, ippNextAttribute,
 };
 use cups_rs::config::{EncryptionMode, set_encryption, set_server};
+use cups_rs::connection::HttpConnection;
 use cups_rs::{ConnectionFlags, get_all_destinations, get_default_destination};
 
 /// Show available printers and drivers
@@ -102,15 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Handles `-v` flag: lists the available devices.
 fn show_devices(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    // Get a destination to establish connection
-    let dest = match get_default_destination() {
-        Ok(d) => d,
-        Err(_) => {
-            let list = get_all_destinations()?;
-            list.into_iter().next().ok_or("No printers configured")?
-        }
-    };
-    let connection = dest.connect(ConnectionFlags::Scheduler, Some(30000), None)?;
+    let connection = scheduler_connection()?;
 
     // Create CUPS_GET_DEVICES ipp request using raw operation code
     let request = unsafe { ippNewRequest(ipp_op_e_IPP_OP_CUPS_GET_DEVICES as i32) };
@@ -118,6 +112,9 @@ fn show_devices(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if request.is_null() {
         return Err("Failed to create IPP request".into());
     }
+
+    // add required IPP op attributes (matching libcups defaults)
+    add_standard_ipp_attrs(request)?;
 
     // Add timeout attribute
     let timeout_name = std::ffi::CString::new("timeout")?;
@@ -163,18 +160,7 @@ fn show_devices(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Send request
-    let resource = std::ffi::CString::new("/")?;
-    let response = unsafe { cupsDoRequest(connection.as_ptr(), request, resource.as_ptr()) };
-
-    if response.is_null() {
-        return Err(format!("lpinfo: {}", cups_last_error()).into());
-    }
-
-    let status = unsafe { ippGetStatusCode(response) };
-    if !ipp_is_success(status) {
-        unsafe { cups_rs::bindings::ippDelete(response) };
-        return Err(format!("lpinfo: CUPS-GET-DEVICES failed: {}", cups_last_error()).into());
-    }
+    let response = send_ipp_request(request, &connection, "CUPS-GET-DEVICES")?;
 
     // Parse the result
     let mut attr = unsafe { ippFirstAttribute(response) };
@@ -240,14 +226,7 @@ fn show_devices(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Handles `-m` flag: lists the available drivers.
 fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let dest = match get_default_destination() {
-        Ok(d) => d,
-        Err(_) => {
-            let list = get_all_destinations()?;
-            list.into_iter().next().ok_or("No printers configured")?
-        }
-    };
-    let connection = dest.connect(ConnectionFlags::Scheduler, Some(30000), None)?;
+    let connection = scheduler_connection()?;
 
     // Create CUPS_GET_PPDS ipp request using raw operation code
     let request = unsafe { ippNewRequest(ipp_op_e_IPP_OP_CUPS_GET_PPDS as i32) };
@@ -255,6 +234,8 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if request.is_null() {
         return Err("Failed to create IPP request".into());
     }
+
+    add_standard_ipp_attrs(request)?;
 
     // Add filter attributes
     if let Some(ref device_id) = args.device_id {
@@ -273,13 +254,13 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(ref language) = args.language {
-        let name = std::ffi::CString::new("ppd-natural-language")?;
+        let name = std::ffi::CString::new("ppd-language")?;
         let value = std::ffi::CString::new(language.as_str())?;
         unsafe {
             ippAddString(
                 request,
                 ipp_tag_e_IPP_TAG_OPERATION,
-                ipp_tag_e_IPP_TAG_NAME,
+                ipp_tag_e_IPP_TAG_LANGUAGE,
                 name.as_ptr(),
                 std::ptr::null(),
                 value.as_ptr(),
@@ -348,18 +329,7 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Send request
-    let resource = std::ffi::CString::new("/")?;
-    let response = unsafe { cupsDoRequest(connection.as_ptr(), request, resource.as_ptr()) };
-
-    if response.is_null() {
-        return Err(format!("lpinfo: {}", cups_last_error()).into());
-    }
-
-    let status = unsafe { ippGetStatusCode(response) };
-    if !ipp_is_success(status) {
-        unsafe { cups_rs::bindings::ippDelete(response) };
-        return Err(format!("lpinfo: CUPS-GET-PPDS failed: {}", cups_last_error()).into());
-    }
+    let response = send_ipp_request(request, &connection, "CUPS-GET-PPDS")?;
 
     let mut ppd_name = String::new();
     let mut ppd_lang = String::new();
@@ -451,13 +421,38 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Returns last cups error string
-fn cups_last_error() -> String {
-    unsafe {
-        std::ffi::CStr::from_ptr(cupsLastErrorString())
-            .to_string_lossy()
-            .into_owned()
+/// Get a `HttpConnection` to the scheduler
+fn scheduler_connection() -> Result<HttpConnection, Box<dyn std::error::Error>> {
+    let dest = match get_default_destination() {
+        Ok(d) => d,
+        Err(_) => {
+            let list = get_all_destinations()?;
+            list.into_iter().next().ok_or("No printers configured")?
+        }
+    };
+
+    Ok(dest.connect(ConnectionFlags::Scheduler, Some(30000), None)?)
+}
+
+fn send_ipp_request(
+    request: *mut cups_rs::bindings::_ipp_s,
+    connection: &HttpConnection,
+    op_name: &str,
+) -> Result<*mut cups_rs::bindings::_ipp_s, Box<dyn std::error::Error>> {
+    let resource = std::ffi::CString::new("/")?;
+    let response = unsafe { cupsDoRequest(connection.as_ptr(), request, resource.as_ptr()) };
+
+    if response.is_null() {
+        return Err(format!("lpinfo: {}", cups_last_error()).into());
     }
+
+    let status = unsafe { ippGetStatusCode(response) };
+    if !ipp_is_success(status) {
+        unsafe { ippDelete(response) };
+        return Err(format!("lpinfo: {} failed: {}", op_name, cups_last_error()).into());
+    }
+
+    Ok(response)
 }
 
 /// Check if response to the ipp request was a success
@@ -465,4 +460,54 @@ fn ipp_is_success(status: i32) -> bool {
     status == ipp_status_e_IPP_STATUS_OK
         || status == ipp_status_e_IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED
         || status == ipp_status_e_IPP_STATUS_OK_CONFLICTING
+}
+
+fn add_standard_ipp_attrs(
+    request: *mut cups_rs::bindings::_ipp_s,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let charset = std::ffi::CString::new("utf-8")?;
+    let language = std::ffi::CString::new("en")?;
+    let user = std::ffi::CString::new(env::var("USER").unwrap_or_else(|_| "unknown".into()))?;
+
+    let name_charset = std::ffi::CString::new("attributes-charset")?;
+    let name_language = std::ffi::CString::new("attributes-natural-language")?;
+    let name_user = std::ffi::CString::new("requesting-user-name")?;
+
+    unsafe {
+        ippAddString(
+            request,
+            ipp_tag_e_IPP_TAG_OPERATION,
+            ipp_tag_e_IPP_TAG_CHARSET,
+            name_charset.as_ptr(),
+            std::ptr::null(),
+            charset.as_ptr(),
+        );
+        ippAddString(
+            request,
+            ipp_tag_e_IPP_TAG_OPERATION,
+            ipp_tag_e_IPP_TAG_LANGUAGE,
+            name_language.as_ptr(),
+            std::ptr::null(),
+            language.as_ptr(),
+        );
+        ippAddString(
+            request,
+            ipp_tag_e_IPP_TAG_OPERATION,
+            ipp_tag_e_IPP_TAG_NAME,
+            name_user.as_ptr(),
+            std::ptr::null(),
+            user.as_ptr(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Returns last cups error string
+fn cups_last_error() -> String {
+    unsafe {
+        std::ffi::CStr::from_ptr(cupsLastErrorString())
+            .to_string_lossy()
+            .into_owned()
+    }
 }

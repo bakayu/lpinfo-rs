@@ -8,3 +8,4 @@ readme = "README.md"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 cups_rs = "0.3.0"
+env = "1"
