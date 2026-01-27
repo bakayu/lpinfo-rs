@@ -1,16 +1,18 @@
 use clap::Parser;
 use cups_rs::bindings::{
-    cupsDoRequest, cupsLastErrorString, ipp_op_e_IPP_OP_CUPS_GET_DEVICES,
-    ipp_op_e_IPP_OP_CUPS_GET_PPDS, ipp_status_e_IPP_STATUS_OK,
-    ipp_status_e_IPP_STATUS_OK_CONFLICTING, ipp_status_e_IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED,
-    ipp_tag_e_IPP_TAG_CHARSET, ipp_tag_e_IPP_TAG_INTEGER, ipp_tag_e_IPP_TAG_KEYWORD,
-    ipp_tag_e_IPP_TAG_LANGUAGE, ipp_tag_e_IPP_TAG_NAME, ipp_tag_e_IPP_TAG_OPERATION,
-    ipp_tag_e_IPP_TAG_TEXT, ippAddInteger, ippAddString, ippDelete, ippFirstAttribute, ippGetName,
-    ippGetStatusCode, ippGetString, ippNewRequest, ippNextAttribute,
+    _ipp_s, cups_option_t, cupsAddOption, cupsDoRequest, cupsEncodeOptions2, cupsFreeOptions,
+    cupsLastErrorString, ipp_op_e_IPP_OP_CUPS_GET_DEVICES, ipp_op_e_IPP_OP_CUPS_GET_PPDS,
+    ipp_status_e_IPP_STATUS_OK, ipp_status_e_IPP_STATUS_OK_CONFLICTING,
+    ipp_status_e_IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED, ipp_tag_e_IPP_TAG_CHARSET,
+    ipp_tag_e_IPP_TAG_INTEGER, ipp_tag_e_IPP_TAG_LANGUAGE, ipp_tag_e_IPP_TAG_NAME,
+    ipp_tag_e_IPP_TAG_OPERATION, ipp_tag_e_IPP_TAG_TEXT, ippAddInteger, ippAddString, ippDelete,
+    ippFirstAttribute, ippGetName, ippGetStatusCode, ippGetString, ippNewRequest, ippNextAttribute,
 };
 use cups_rs::config::{EncryptionMode, set_encryption, set_server};
 use cups_rs::connection::HttpConnection;
 use cups_rs::{ConnectionFlags, get_all_destinations, get_default_destination};
+use std::ffi::{CStr, CString};
+use std::ptr;
 
 /// Show available printers and drivers
 #[derive(Parser, Debug)]
@@ -117,7 +119,7 @@ fn show_devices(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     add_standard_ipp_attrs(request)?;
 
     // Add timeout attribute
-    let timeout_name = std::ffi::CString::new("timeout")?;
+    let timeout_name = CString::new("timeout")?;
     unsafe {
         ippAddInteger(
             request,
@@ -129,35 +131,7 @@ fn show_devices(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Add include/exclude schemes if specified
-    if let Some(ref schemes) = args.include_schemes {
-        let name = std::ffi::CString::new("include-schemes")?;
-        let value = std::ffi::CString::new(schemes.as_str())?;
-        unsafe {
-            ippAddString(
-                request,
-                ipp_tag_e_IPP_TAG_OPERATION,
-                ipp_tag_e_IPP_TAG_KEYWORD,
-                name.as_ptr(),
-                std::ptr::null(),
-                value.as_ptr(),
-            );
-        }
-    }
-
-    if let Some(ref schemes) = args.exclude_schemes {
-        let name = std::ffi::CString::new("exclude-schemes")?;
-        let value = std::ffi::CString::new(schemes.as_str())?;
-        unsafe {
-            ippAddString(
-                request,
-                ipp_tag_e_IPP_TAG_OPERATION,
-                ipp_tag_e_IPP_TAG_KEYWORD,
-                name.as_ptr(),
-                std::ptr::null(),
-                value.as_ptr(),
-            );
-        }
-    }
+    add_cups_options(request, &args.include_schemes, &args.exclude_schemes)?;
 
     // Send request
     let response = send_ipp_request(request, &connection, "CUPS-GET-DEVICES")?;
@@ -178,13 +152,13 @@ fn show_devices(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 attr = ippNextAttribute(response);
                 continue;
             }
-            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            CStr::from_ptr(ptr).to_string_lossy().into_owned()
         };
 
         let value = unsafe {
             let ptr = ippGetString(attr, 0, std::ptr::null_mut());
             if !ptr.is_null() {
-                std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                CStr::from_ptr(ptr).to_string_lossy().into_owned()
             } else {
                 String::new()
             }
@@ -239,8 +213,8 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Add filter attributes
     if let Some(ref device_id) = args.device_id {
-        let name = std::ffi::CString::new("ppd-device-id")?;
-        let value = std::ffi::CString::new(device_id.as_str())?;
+        let name = CString::new("ppd-device-id")?;
+        let value = CString::new(device_id.as_str())?;
         unsafe {
             ippAddString(
                 request,
@@ -254,8 +228,8 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(ref language) = args.language {
-        let name = std::ffi::CString::new("ppd-language")?;
-        let value = std::ffi::CString::new(language.as_str())?;
+        let name = CString::new("ppd-language")?;
+        let value = CString::new(language.as_str())?;
         unsafe {
             ippAddString(
                 request,
@@ -269,8 +243,8 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(ref make_model) = args.make_model {
-        let name = std::ffi::CString::new("ppd-make-and-model")?;
-        let value = std::ffi::CString::new(make_model.as_str())?;
+        let name = CString::new("ppd-make-and-model")?;
+        let value = CString::new(make_model.as_str())?;
         unsafe {
             ippAddString(
                 request,
@@ -284,8 +258,8 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(ref product) = args.product {
-        let name = std::ffi::CString::new("ppd-product")?;
-        let value = std::ffi::CString::new(product.as_str())?;
+        let name = CString::new("ppd-product")?;
+        let value = CString::new(product.as_str())?;
         unsafe {
             ippAddString(
                 request,
@@ -298,35 +272,8 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if let Some(ref schemes) = args.include_schemes {
-        let name = std::ffi::CString::new("include-schemes")?;
-        let value = std::ffi::CString::new(schemes.as_str())?;
-        unsafe {
-            ippAddString(
-                request,
-                ipp_tag_e_IPP_TAG_OPERATION,
-                ipp_tag_e_IPP_TAG_KEYWORD,
-                name.as_ptr(),
-                std::ptr::null(),
-                value.as_ptr(),
-            );
-        }
-    }
-
-    if let Some(ref schemes) = args.exclude_schemes {
-        let name = std::ffi::CString::new("exclude-schemes")?;
-        let value = std::ffi::CString::new(schemes.as_str())?;
-        unsafe {
-            ippAddString(
-                request,
-                ipp_tag_e_IPP_TAG_OPERATION,
-                ipp_tag_e_IPP_TAG_KEYWORD,
-                name.as_ptr(),
-                std::ptr::null(),
-                value.as_ptr(),
-            );
-        }
-    }
+    // Add include/exclude schemes if specified
+    add_cups_options(request, &args.include_schemes, &args.exclude_schemes)?;
 
     // Send request
     let response = send_ipp_request(request, &connection, "CUPS-GET-PPDS")?;
@@ -360,13 +307,13 @@ fn show_models(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 attr = ippNextAttribute(response);
                 continue;
             }
-            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            CStr::from_ptr(ptr).to_string_lossy().into_owned()
         };
 
         let value = unsafe {
             let ptr = ippGetString(attr, 0, std::ptr::null_mut());
             if !ptr.is_null() {
-                std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                CStr::from_ptr(ptr).to_string_lossy().into_owned()
             } else {
                 String::new()
             }
@@ -439,7 +386,7 @@ fn send_ipp_request(
     connection: &HttpConnection,
     op_name: &str,
 ) -> Result<*mut cups_rs::bindings::_ipp_s, Box<dyn std::error::Error>> {
-    let resource = std::ffi::CString::new("/")?;
+    let resource = CString::new("/")?;
     let response = unsafe { cupsDoRequest(connection.as_ptr(), request, resource.as_ptr()) };
 
     if response.is_null() {
@@ -456,22 +403,26 @@ fn send_ipp_request(
 }
 
 /// Check if response to the ipp request was a success
+#[allow(non_upper_case_globals)]
 fn ipp_is_success(status: i32) -> bool {
-    status == ipp_status_e_IPP_STATUS_OK
-        || status == ipp_status_e_IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED
-        || status == ipp_status_e_IPP_STATUS_OK_CONFLICTING
+    match status {
+        ipp_status_e_IPP_STATUS_OK => true,
+        ipp_status_e_IPP_STATUS_OK_CONFLICTING => true,
+        ipp_status_e_IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED => true,
+        _ => false,
+    }
 }
 
 fn add_standard_ipp_attrs(
     request: *mut cups_rs::bindings::_ipp_s,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let charset = std::ffi::CString::new("utf-8")?;
-    let language = std::ffi::CString::new("en")?;
-    let user = std::ffi::CString::new(env::var("USER").unwrap_or_else(|_| "unknown".into()))?;
+    let charset = CString::new("utf-8")?;
+    let language = CString::new("en")?;
+    let user = CString::new(env::var("USER").unwrap_or_else(|_| "unknown".into()))?;
 
-    let name_charset = std::ffi::CString::new("attributes-charset")?;
-    let name_language = std::ffi::CString::new("attributes-natural-language")?;
-    let name_user = std::ffi::CString::new("requesting-user-name")?;
+    let name_charset = CString::new("attributes-charset")?;
+    let name_language = CString::new("attributes-natural-language")?;
+    let name_user = CString::new("requesting-user-name")?;
 
     unsafe {
         ippAddString(
@@ -506,8 +457,40 @@ fn add_standard_ipp_attrs(
 /// Returns last cups error string
 fn cups_last_error() -> String {
     unsafe {
-        std::ffi::CStr::from_ptr(cupsLastErrorString())
+        CStr::from_ptr(cupsLastErrorString())
             .to_string_lossy()
             .into_owned()
     }
+}
+
+fn add_cups_options(
+    request: *mut _ipp_s,
+    include: &Option<String>,
+    exclude: &Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut num_options: i32 = 0;
+    let mut options: *mut cups_option_t = ptr::null_mut();
+
+    if let Some(schemes) = include {
+        let name = CString::new("include-schemes")?;
+        let value = CString::new(schemes.as_str())?;
+        unsafe {
+            num_options = cupsAddOption(name.as_ptr(), value.as_ptr(), num_options, &mut options);
+        }
+    }
+
+    if let Some(schemes) = exclude {
+        let name = CString::new("exclude-schemes")?;
+        let value = CString::new(schemes.as_str())?;
+        unsafe {
+            num_options = cupsAddOption(name.as_ptr(), value.as_ptr(), num_options, &mut options);
+        }
+    }
+
+    unsafe {
+        cupsEncodeOptions2(request, num_options, options, ipp_tag_e_IPP_TAG_OPERATION);
+        cupsFreeOptions(num_options, options);
+    }
+
+    Ok(())
 }
