@@ -9,3 +9,6 @@ readme = "README.md"
 clap = { version = "4", features = ["derive"] }
 cups_rs = "0.3.0"
 env = "1"
+
+[patch.crates-io]
+cups_rs = { path = "../cups-rs" }
